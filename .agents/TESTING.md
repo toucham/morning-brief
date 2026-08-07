@@ -158,14 +158,24 @@ func TestLoadConfig_NotFound(t *testing.T) {
 
 ### Check Error Messages
 ```go
-func TestIsAlive_InvalidPID(t *testing.T) {
-    lf := &Lockfile{PID: -1}
+func TestIsAlive_ValidAndInvalidPID(t *testing.T) {
+    tests := []struct {
+        name    string
+        pid     int
+        wantErr bool  // Note: IsAlive() returns bool, not error
+    }{
+        {"valid pid", os.Getpid(), false},
+        {"invalid pid", -1, true},
+    }
     
-    // If IsAlive returns an error
-    if err := lf.IsAlive(); err != nil {
-        if !strings.Contains(err.Error(), "invalid pid") {
-            t.Errorf("unexpected error message: %v", err)
-        }
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            lf := &Lockfile{PID: tt.pid}
+            got := lf.IsAlive()
+            if got != !tt.wantErr {  // IsAlive true => expected alive (wantErr false)
+                t.Errorf("IsAlive(%d) = %v, want %v", tt.pid, got, !tt.wantErr)
+            }
+        })
     }
 }
 ```
@@ -365,6 +375,20 @@ go tool cover -html=coverage.out
 ```
 
 **Target**: >80% for core logic. Don't obsess over 100%—focus on meaningful tests, not line coverage.
+
+---
+
+## Before You're Done
+
+Before marking work complete, run these checks alongside `go test ./...`:
+
+```bash
+go vet ./...
+gofmt -l .
+golangci-lint run  # if configured in the project
+```
+
+These are not optional. Tests passing is necessary but not sufficient — code must also be formatted and pass static checks.
 
 ---
 

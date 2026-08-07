@@ -113,33 +113,34 @@ var lockfileStart time.Time
 
 ## When to Create an Interface
 
-### Create an interface when:
-1. **Multiple implementations possible**: Mock for testing, real implementation for production
-2. **Consumed by another package**: Decouples consumer from concrete type
-3. **Dependency to inject**: Makes dependencies explicit in constructors
+**Rule**: Don't design with interfaces upfront. Discover them as needed. Go's proverb: "Accept interfaces, return structs" — start with concrete types; add an interface only when **two conditions** align:
+
+1. **A genuine need appears**: Either a second real implementation exists, or a test needs to substitute a fake
+2. **Benefit outweighs ceremony**: Coupling becomes a problem if left unfixed
+
+**For Phase 1**: No interfaces needed yet for `Client`, `Server`, or `Config` — each has exactly one concrete implementation and one caller. Examples:
 
 ```go
-// Good: Consumer defines interface it needs
-package server
+// Good: Concrete struct, no interface wrapper (Phase 1)
+type Server struct {
+    config config.ServerConfig
+}
 
-type BriefGenerator interface {
+// Also good: Mock interfaces *discovered* when testing needs one
+// (in _test.go, not main code)
+type mockHTTPClient struct {
+    doFn func(*http.Request) (*http.Response, error)
+}
+
+// Future (Phase 2+): Internal/llm will have multiple providers → interface is justified
+type Provider interface {
     Generate(ctx context.Context, req *api.BriefRequest) (*api.BriefResponse, error)
 }
-
-type Server struct {
-    gen BriefGenerator  // Inject as interface
-}
-
-// Bad: Exporting concrete type, consumer imports impl package
-package api
-type BriefGeneratorImpl struct { ... }
-
-package server
-s := server.NewServer(&api.BriefGeneratorImpl{})  // Tight coupling
+// (Claude, OpenAI, Ollama implementations — the spec already names them)
 ```
 
 ### Rule of thumb:
-**Define interfaces in the consumer package, implement in any package.** Go satisfies implicitly.
+**Define interfaces in the consumer package when one is genuinely needed; implement in any package.** Go satisfies implicitly. But wait to define the interface until you have proof (multiple implementations or a testing need).
 
 ---
 

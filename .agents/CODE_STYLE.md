@@ -7,7 +7,7 @@
 | **Packages** | lowercase, single word, no underscores | `client`, `config`, `server` (not `Client`, `my_client`) |
 | **Exported** | CamelCase | `NewClient()`, `Brief()`, `BriefResponse` |
 | **Unexported** | camelCase | `newHandler()`, `briefResponse`, `parseConfig()` |
-| **Constants** | UPPER_CASE or CapitalCase | `DefaultPort`, `ErrNotFound` |
+| **Constants** | CapitalCase (exported) / camelCase (unexported) | `DefaultPort`, `errNotFound` (never `UPPER_SNAKE_CASE`) |
 | **Booleans** | Prefix with `is`, `has`, `can` | `isAlive`, `hasError` (not `alive`, `error`) |
 | **Receivers** | Short, consistent (1-2 chars) | `c`, `s`, `cl` (same across all methods on type) |
 | **Interfaces** | Often end in `-er`: `Reader`, `Writer`, `Generator` | `BriefGenerator`, `Closer` |
@@ -271,6 +271,18 @@ defer closer.Close()
 
 ---
 
+---
+
+## Tooling: Non-negotiable
+
+- **`gofmt -l .`**: Before considering work done, run `gofmt` (or enable in your editor). Go formatting is not a style choice; it's enforced by the language itself.
+- **`go vet ./...`**: Catch static errors before tests run.
+- **`golangci-lint run`** (if configured): Additional lints; check if the project has a `.golangci.yml`.
+
+These are required checks, not optional nice-to-haves.
+
+---
+
 ## Summary
 
 - **Packages**: lowercase, no underscores; exports CamelCase, unexports camelCase
@@ -281,3 +293,4 @@ defer closer.Close()
 - **Guard clauses**: Early returns, avoid deep nesting
 - **Comments**: Explain *why*, not *what*
 - **Type assertions**: Always use comma-ok
+- **Formatting**: `gofmt` is mandatory, not optional

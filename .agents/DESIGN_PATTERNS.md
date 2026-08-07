@@ -2,39 +2,52 @@
 
 ## Dependency Injection
 
-**Rule**: High-level modules depend on abstractions (interfaces), not concrete implementations.
+**Rule**: Prefer concrete types by default. Go's proverb: "Don't design with interfaces, discover them." Only introduce an interface when you have proof — either a second real implementation or a genuine testing need.
 
-### Constructor Injection (Standard Pattern)
+### Constructor Injection (Standard Pattern, Concrete First)
 ```go
-// Consumer package defines what it needs
+// Phase 1: Inject concrete types
 package server
 
-type BriefGenerator interface {
-    Generate(ctx context.Context, req *api.BriefRequest) (*api.BriefResponse, error)
-}
-
 type Server struct {
-    gen    BriefGenerator
     config config.ServerConfig
 }
 
-// Constructor accepts dependencies as interfaces
-func NewServer(gen BriefGenerator, cfg config.ServerConfig) *Server {
-    return &Server{gen: gen, config: cfg}
+func NewServer(cfg config.ServerConfig) *Server {
+    return &Server{config: cfg}
 }
 
-// Producer can be in any package
-package impl
+// If testing needs a mock HTTP client (discovered need):
+// Define the interface IN the test, not the main code
+package server_test
 
-type GeneratorImpl struct { ... }
-func (g *GeneratorImpl) Generate(...) { ... }
+type mockHTTPClient struct {
+    doFn func(*http.Request) (*http.Response, error)
+}
 
-// Wiring in cmd/
-gen := &impl.GeneratorImpl{...}
-srv := server.NewServer(gen, cfg)
+func (m *mockHTTPClient) Do(req *http.Request) (*http.Response, error) {
+    return m.doFn(req)
+}
+
+// Later (Phase 2+, with proof): If internal/llm needs multiple providers (Claude/OpenAI/Ollama)
+package llm
+
+type Provider interface {
+    Generate(ctx context.Context, req *api.BriefRequest) (*api.BriefResponse, error)
+}
+
+package server
+
+type Server struct {
+    provider llm.Provider  // NOW justify an interface
+}
+
+func NewServer(provider llm.Provider, cfg config.ServerConfig) *Server {
+    return &Server{provider: provider, config: cfg}
+}
 ```
 
-**Why**: Decouples caller from implementation. Easy to test with mocks. Swap implementations later without changing consumer code.
+**Why**: Concrete-first keeps code simple until complexity is justified. Interfaces emerge from need, not speculation. When you do add one, it's clear to future readers that multiple implementations or testing trade-offs are involved.
 
 ---
 
@@ -257,80 +270,151 @@ func (cs *ChildService) Init() {
 
 ---
 
-## Concurrency Patterns
+## Graceful Shutdown (Idiomatic Go 1.21+)
 
-### Use Goroutines with Channels for Coordination
+This pattern applies to `cmd/server` to enable `morning server stop` via SIGTERM. Use `signal.NotifyContext` to cancel operations cleanly.
+
 ```go
-// Bad: Uncoordinated goroutines
-go func() {
-    data := fetchData()  // No way to know when it's done
-    // ...
-}()
+// cmd/server/main.go
+package main
 
-// Good: Channel for coordination
-done := make(chan error)
-go func() {
-    data, err := fetchData()
-    done <- err
-}()
+import (
+    "context"
+    "net/http"
+    "os"
+    "os/signal"
+    "syscall"
+    "time"
+)
 
-// Wait for completion
-if err := <-done; err != nil {
-    log.Fatal(err)
-}
+func main() {
+    // Context that cancels on SIGINT or SIGTERM
+    ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+    defer stop()
 
-// Even better: Use context for cancellation
-ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-defer cancel()
+    // Start server in a goroutine
+    httpSrv := &http.Server{Addr: ":8787", Handler: http.NewServeMux()}
+    go func() {
+        if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+            fmt.Fprintf(os.Stderr, "server error: %v\n", err)
+        }
+    }()
 
-done := make(chan error, 1)
-go func() {
-    data, err := fetchData(ctx)
-    done <- err
-}()
+    // Wait for shutdown signal
+    <-ctx.Done()
 
-select {
-case err := <-done:
-    if err != nil { log.Fatal(err) }
-case <-ctx.Done():
-    log.Fatal("timeout")
-}
-```
-
-### Protect Shared State with Mutex
-```go
-type Server struct {
-    mu    sync.Mutex
-    state map[string]interface{}
-}
-
-func (s *Server) Set(key string, value interface{}) {
-    s.mu.Lock()
-    defer s.mu.Unlock()
-    s.state[key] = value
-}
-
-func (s *Server) Get(key string) interface{} {
-    s.mu.Lock()
-    defer s.mu.Unlock()
-    return s.state[key]
-}
-```
-
-### Use `defer` for Cleanup
-```go
-// Good: Guaranteed cleanup
-func (s *Server) ListenAndServe() error {
-    listener, err := net.Listen("tcp", s.addr)
-    if err != nil {
-        return err
-    }
-    defer listener.Close()
+    // Graceful shutdown with timeout
+    shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
     
-    // listener is guaranteed to close, even on early return
-    return http.Serve(listener, s.Handler())
+    if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+        fmt.Fprintf(os.Stderr, "shutdown error: %v\n", err)
+    }
 }
 ```
+
+**Key points**:
+- `signal.NotifyContext` converts SIGTERM/SIGINT into a context cancellation — no manual signal handling needed.
+- `http.Server.Shutdown(ctx)` gracefully stops accepting new connections and waits for active handlers to finish.
+- The timeout prevents the server from hanging forever — if shutdown takes >5s, it hard-stops anyway.
+- This is what `morning server stop` (sending SIGTERM to the spawned process) triggers.
+
+---
+
+---
+
+## Logging
+
+**Rule**: Use `log/slog` (stdlib, Go 1.21+) for anything beyond a one-off CLI print. Avoid global loggers — pass context explicitly or attach a logger to types that need it.
+
+```go
+// Good: Construct once, pass explicitly
+func main() {
+    logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+    server := server.NewServer(cfg, logger)
+    // ...
+}
+
+type Server struct {
+    log *slog.Logger
+    // ...
+}
+
+func (s *Server) Handle(w http.ResponseWriter, r *http.Request) {
+    s.log.Info("request", "method", r.Method, "path", r.URL.Path)
+}
+
+// Good: One-off CLI output is OK with fmt
+fmt.Println("server stopped")
+
+// Bad: Don't mix fmt.Println and logging in the same flow
+log.Printf("fetching...")  // inconsistent with slog
+```
+
+**Why**: Structured logging (`slog`) makes debugging easier (machine-readable fields, log levels) and is the modern Go standard. Avoid `fmt.Println` for operational events; reserve it for user-facing CLI output only.
+
+---
+
+## CLI Entrypoints
+
+**Rule**: Keep `main()` thin and untestable; put real logic in a testable `run(ctx) error` function. This applies to both `cmd/cli` and `cmd/server`.
+
+```go
+// Good: cmd/cli/main.go
+package main
+
+import (
+    "context"
+    "os"
+)
+
+func main() {
+    os.Exit(run(context.Background(), os.Args))
+}
+
+func run(ctx context.Context, args []string) int {
+    cmd := cmd.NewRootCmd()  // Cobra setup here, testable
+    if err := cmd.ExecuteContext(ctx); err != nil {
+        return 1
+    }
+    return 0
+}
+
+// Good: cmd/server/main.go
+package main
+
+import (
+    "context"
+    "os"
+)
+
+func main() {
+    os.Exit(run(context.Background()))
+}
+
+func run(ctx context.Context) int {
+    cfg, err := config.Load()
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "config error: %v\n", err)
+        return 1
+    }
+    
+    srv := server.New(cfg)
+    if err := srv.ListenAndServe(ctx); err != nil {
+        fmt.Fprintf(os.Stderr, "server error: %v\n", err)
+        return 1
+    }
+    return 0
+}
+
+// Bad: Don't put logic in main()
+func main() {
+    // parsing, server setup, error handling all here
+    // hard to test
+}
+```
+
+**Why**: `main()` can't be tested in isolation. The `run` pattern keeps the entry point trivial and lets unit tests call `run` with a test `context.Context` or test config.
 
 ---
 
@@ -401,10 +485,12 @@ func TestServer(t *testing.T) {
 
 ## Summary
 
-- **Dependency Injection**: Constructor-based, interfaces in consumer packages
-- **Interfaces**: Small (1-3 methods), satisfied implicitly
+- **Dependency Injection**: Concrete types first, interfaces only when discovered (multiple implementations or genuine test need)
+- **Interfaces**: Define in consumer package, small (1-3 methods), satisfied implicitly — but wait to define until needed
 - **Errors**: Wrapped with context using `fmt.Errorf("%w", ...)`, sentinel errors for expected failures
 - **Composition**: Over inheritance; embed for shared behavior
-- **Concurrency**: Channels + goroutines, mutexes for shared state, `defer` for cleanup
-- **Testing**: Table-driven tests, mock interfaces
-- **Avoid**: Global state, unbounded goroutines, silent error swallowing
+- **Graceful Shutdown**: `signal.NotifyContext` + `http.Server.Shutdown(ctx)` with timeout — standard for any long-running server
+- **Logging**: `log/slog` for structured logging, pass logger explicitly (not global), use `fmt` only for CLI output
+- **CLI Entrypoints**: Thin `main()` that calls `run(ctx) error` — keeps entry point trivial and logic testable
+- **Testing**: Table-driven tests, mock interfaces (defined in test files, not main code)
+- **Avoid**: Global state, interface-first design, unbounded goroutines, silent error swallowing
