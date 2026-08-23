@@ -57,21 +57,30 @@ go get gopkg.in/yaml.v3@latest        # YAML config
 
 ## Configuration
 
-### Paths (XDG conventions)
+### Paths (Go stdlib, platform-native)
 
-Use `$XDG_CONFIG_HOME` / `$HOME/.config` and `$XDG_STATE_HOME` / `$HOME/.local/state` directly — **not** `os.UserConfigDir()` (resolves to `~/Library/Application Support` on macOS, contradicting the spec).
+Use Go's standard library `os.UserConfigDir()` and `os.UserCacheDir()` functions to resolve platform-specific paths. This eliminates hand-rolled environment-variable logic and ensures correct paths on every platform: Linux follows XDG conventions, macOS uses native `Library/` directories, and Windows uses native `%AppData%` / `%LocalAppData%` locations. Paths will differ by OS — this is intentional and correct.
 
-Helper functions to implement (in `internal/config`):
+**Rationale**: No custom helpers needed — call `os.UserConfigDir()` and `os.UserCacheDir()` directly. Both can return an error (e.g., `$HOME` unset); propagate it in the path functions rather than silently falling back. Note: Go stdlib provides no `UserStateDir()` equivalent; use `os.UserCacheDir()` for lockfile and log paths since they are regenerable, ephemeral runtime artifacts.
+
+Path functions to implement (in `internal/config`):
+```go
+func ClientConfigPath() (string, error)      // {os.UserConfigDir()}/morning-cli/client.yaml
+func ServerConfigPath() (string, error)      // {os.UserConfigDir()}/morning-server/server.yaml
+func ClientLockfilePath() (string, error)    // {os.UserCacheDir()}/morning-cli/server.lock
+func ClientLogPath() (string, error)         // {os.UserCacheDir()}/morning-cli/server.log
 ```
-func configHome() string                    // $XDG_CONFIG_HOME or $HOME/.config
-func stateHome() string                     // $XDG_STATE_HOME or $HOME/.local/state
-func ClientConfigPath() string              // ~/.config/morning-cli/client.yaml
-func ServerConfigPath() string              // ~/.config/morning-server/server.yaml
-func ClientLockfilePath() string            // ~/.local/state/morning-cli/server.lock
-func ClientLogPath() string                 // ~/.local/state/morning-cli/server.log
-```
 
-### Client Config (`~/.config/morning-cli/client.yaml`)
+**Platform-specific paths** (reference; actual locations determined at runtime):
+| Platform | Config example | Cache/state example |
+|----------|---|---|
+| Linux | `~/.config/morning-cli/client.yaml` | `~/.cache/morning-cli/server.lock` |
+| macOS | `~/Library/Application Support/morning-cli/client.yaml` | `~/Library/Caches/morning-cli/server.lock` |
+| Windows | `%AppData%\morning-cli\client.yaml` | `%LocalAppData%\morning-cli\server.lock` |
+
+### Client Config
+
+Stored at the path returned by `ClientConfigPath()` (platform-specific location determined by `os.UserConfigDir()`).
 
 YAML file, struct:
 ```go
@@ -92,7 +101,9 @@ func SaveClientConfig(cfg ClientConfig) error  // mkdir -p parent, write 0644
 
 **Design for future growth**: Later phases add sibling keys to `ClientConfig` (`news:`, `stocks:`, `llm:`, `output:`) without reshaping `ServerConn` or the Load/Save signatures.
 
-### Server Config (`~/.config/morning-server/server.yaml`)
+### Server Config
+
+Stored at the path returned by `ServerConfigPath()` (platform-specific location determined by `os.UserConfigDir()`).
 
 YAML file, struct:
 ```go
@@ -109,7 +120,9 @@ func SaveServerConfig(cfg ServerConfig) error
 
 **Note**: No API keys in config — they live in env vars, added in a later phase when LLM provider integration happens. This struct can grow without reshaping when that arrives.
 
-### Lockfile (`~/.local/state/morning-cli/server.lock`)
+### Lockfile
+
+Stored at the path returned by `ClientLockfilePath()` (platform-specific location determined by `os.UserCacheDir()`).
 
 JSON file (not YAML — machine-only, never hand-edited), struct:
 ```go
@@ -128,7 +141,9 @@ func RemoveLockfile(path string) error               // ignore os.ErrNotExist
 func (lf *Lockfile) IsAlive() bool                   // see Liveness Check below
 ```
 
-### Server Log (`~/.local/state/morning-cli/server.log`)
+### Server Log
+
+Stored at the path returned by `ClientLogPath()` (platform-specific location determined by `os.UserCacheDir()`).
 
 Plain text log file. Spawned server's `Stdout` and `Stderr` are redirected here for debugging. Append-mode, 0644.
 
@@ -349,19 +364,22 @@ morning                     # root command (defined in cmd/cli/main.go or a subp
 
 ## Verification Plan (for when logic is implemented)
 
+**Platform note**: Paths below use Linux-style examples (`~/.cache/`, `~/.config/`) for clarity. On macOS, these resolve to `~/Library/Caches/` and `~/Library/Application Support/` respectively; on Windows, to `%LocalAppData%` and `%AppData%`. All paths are determined at runtime via `os.UserCacheDir()` and `os.UserConfigDir()`.
+
 **Setup**:
 - `go build ./...` succeeds with no errors
 - Build named binaries: `go build -o bin/morning ./cmd/cli && go build -o bin/morning-server ./cmd/server`
 - Set `MORNING_SERVER_BIN=$(pwd)/bin/morning-server` in env, or put `bin/` on `PATH`
 
 **Test 1: Spawn path (first run, no lockfile)**
-```
-rm -f ~/.local/state/morning-cli/server.lock
+```bash
+# Remove stale lockfile (adjust path for your platform; example uses Linux)
+rm -f ~/.cache/morning-cli/server.lock
 ./bin/morning brief
 ```
 Expected:
 - Stub JSON printed to stdout
-- Lockfile created at `~/.local/state/morning-cli/server.lock`
+- Lockfile created at the path determined by `ClientLockfilePath()` (e.g., `~/.cache/morning-cli/server.lock` on Linux)
 - `cat` the lockfile, note the PID
 - Verify: `ps -p <pid>` shows the process is running with command `morning-server` or similar
 
@@ -375,15 +393,16 @@ Expected:
 - Verify: `pgrep -fl morning-server` shows exactly one process, with PID matching the lockfile
 
 **Test 3: Stale-lockfile path (kill process, lockfile untouched)**
-```
-kill -9 $(cat ~/.local/state/morning-cli/server.lock | jq .pid)
+```bash
+# Kill the server by PID from lockfile (adjust path for your platform; example uses Linux)
+kill -9 $(cat ~/.cache/morning-cli/server.lock | jq .pid)
 ./bin/morning brief
 ```
 Expected:
 - Detects dead PID via `Signal(0)` check (no HTTP involved)
 - Spawns a new server
 - Lockfile now contains a **different PID**
-- Verify: `cat ~/.local/state/morning-cli/server.lock` shows new PID, `ps -p <new-pid>` shows it running
+- Verify: `cat ~/.cache/morning-cli/server.lock` shows new PID, `ps -p <new-pid>` shows it running
 
 **Test 4: `morning server stop`**
 ```
@@ -392,20 +411,20 @@ Expected:
 Expected:
 - Process for the PID in the lockfile is gone
 - Lockfile file is deleted
-- Verify: `ps -p <pid>` fails (no such process), `ls ~/.local/state/morning-cli/server.lock` shows "no such file"
+- Verify: `ps -p <pid>` fails (no such process), lockfile is gone from the path determined by `ClientLockfilePath()` (e.g., `~/.cache/morning-cli/server.lock` on Linux)
 - Run again with no lockfile:
-  ```
+  ```bash
   ./bin/morning server stop
   ```
   Expected: prints "no local server is running" (or similar friendly message), exits 0
 
 **Test 5: `--server` persistence**
-```
+```bash
 ./bin/morning brief --server http://127.0.0.1:9999
 ```
 Expected:
 - Command fails with a connection error (nothing listening on that port) — this is expected
-- But **before** the error, check: `cat ~/.config/morning-cli/client.yaml` contains `server: { url: http://127.0.0.1:9999 }`
+- But **before** the error, check: `cat $(morning-cli-config-path)/client.yaml` contains `server: { url: http://127.0.0.1:9999 }` (where `morning-cli-config-path` resolves to `~/.config/morning-cli` on Linux, `~/Library/Application Support/morning-cli` on macOS, etc.)
 - Run again with no flags:
   ```
   ./bin/morning brief
@@ -413,12 +432,12 @@ Expected:
   Expected: attempts to use `http://127.0.0.1:9999` (the persisted URL), does not spawn a local server
 
 **Test 6: `--standalone` persistence**
-```
+```bash
 ./bin/morning brief --standalone
 ```
 Expected:
 - Falls through to `EnsureLocalServer` (reuses if a server from Test 2 is still up, else spawns fresh)
-- Check: `cat ~/.config/morning-cli/client.yaml` shows `server: {}` or `server: { url: '' }` or absent
+- Check: `cat $(morning-cli-config-path)/client.yaml` shows `server: {}` or `server: { url: '' }` or absent (platform-specific config directory as per Test 5)
 
 **Test 7: Mutual exclusivity**
 ```
@@ -435,5 +454,5 @@ Expected:
 - **Process.Release()** after `Start()` is important so the parent CLI can exit without blocking on the child, and without creating a zombie.
 - **Spawn readiness via `POST /brief` retries**: since there's no dedicated `/healthz` endpoint, `waitForReady` should poll `client.Brief(ctx, BriefRequest{})` with ~50ms backoff, tolerating connection-refused errors until the server is ready. This proves both network reachability and that the server is actually responding to requests.
 - **PID liveness is the only staleness check**: `IsAlive()` uses `Signal(0)` alone — no HTTP call involved in deciding whether a lockfile is stale.
-- **Append-mode log file** (`~/.local/state/morning-cli/server.log`): redirect `cmd/server`'s stdout/stderr here so multiple server restarts accumulate debugging output instead of overwriting.
+- **Append-mode log file** (path determined by `ClientLogPath()`, e.g. `~/.cache/morning-cli/server.log` on Linux): redirect `cmd/server`'s stdout/stderr here so multiple server restarts accumulate debugging output instead of overwriting.
 - **Error handling**: `EnsureLocalServer` should return clear errors (can't find binary, spawn failed, never became ready). `StopLocalServer` should be idempotent (missing lockfile => print "no local server is running" and return nil, not error).
