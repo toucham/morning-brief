@@ -5,6 +5,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRun(t *testing.T) {
@@ -16,9 +17,9 @@ func TestRun(t *testing.T) {
 	}{
 		{"no args shows help", []string{"brief"}, 0, ""},
 		{"help flag", []string{"brief", "--help"}, 0, ""},
-		{"server start not implemented", []string{"brief", "server", "start"}, 1, "server start: not yet implemented"},
 		{"cli not implemented", []string{"brief", "cli"}, 1, "cli: not yet implemented"},
 		{"unknown subcommand", []string{"brief", "bogus"}, 1, ""},
+		{"server start listen error on invalid address", []string{"brief", "server", "start", "--addr", "999.999.999.999:99999"}, 1, "server start: serve: listen"},
 	}
 
 	for _, tt := range tests {
@@ -32,5 +33,29 @@ func TestRun(t *testing.T) {
 				t.Errorf("run(%v) stderr = %q, want substring %q", tt.args, errOut.String(), tt.wantErrSub)
 			}
 		})
+	}
+}
+
+func TestRun_ServerStart_ShutdownOnCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var out, errOut bytes.Buffer
+	done := make(chan int, 1)
+
+	go func() {
+		done <- run(ctx, []string{"brief", "server", "start", "--addr", "127.0.0.1:0"}, &out, &errOut)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	select {
+	case got := <-done:
+		if got != 0 {
+			t.Fatalf("run() exit = %d, want 0 (stderr=%q)", got, errOut.String())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("run() did not return within 3s of cancellation")
 	}
 }

@@ -8,8 +8,7 @@ import (
 )
 
 // newCLICmd builds "brief cli", which connects to a briefing server. TODO:
-// wire internal/client's HTTP client (see docs/IMPLEMENTATION.md, "HTTP
-// Client").
+// wire internal/client's HTTP client.
 func newCLICmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "cli",

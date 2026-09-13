@@ -12,28 +12,34 @@ import (
 	"time"
 )
 
-// defaultShutdownTimeout bounds how long Serve waits for in-flight requests
-// to drain after ctx is cancelled before forcing the listener closed.
+// defaultShutdownTimeout bounds how long Serve/ListenAndServe wait for
+// in-flight requests to drain after ctx is cancelled before forcing the
+// listener closed.
 const defaultShutdownTimeout = 5 * time.Second
 
-// Config contains the fields for the server configuration.
+// Config contains the server's tunable behavior.
 type Config struct {
+	// Addr is the TCP address ListenAndServe binds, e.g. "127.0.0.1:8080".
+	// Ignored by Serve, which uses the caller-supplied net.Listener instead.
 	Addr string
-	Port int
+
+	// ShutdownTimeout bounds how long Serve/ListenAndServe wait for
+	// in-flight requests to drain after ctx is cancelled. Zero uses
+	// defaultShutdownTimeout.
+	ShutdownTimeout time.Duration
 }
 
 // Server hosts the morning-brief HTTP API: it owns the configured
 // http.Server (routes + middleware) and the shutdown timeout applied when
-// Serve's context is cancelled.
+// Serve/ListenAndServe's context is cancelled.
 type Server struct {
-	cfg             Config
 	log             *slog.Logger
 	httpSrv         *http.Server
 	shutdownTimeout time.Duration
 }
 
-// New creates a Server ready to Serve. If cfg is nil, a zero Config is
-// used. If log is nil, slog.Default() is used.
+// New creates a Server ready to Serve or ListenAndServe. If cfg is nil, a
+// zero Config is used. If log is nil, slog.Default() is used.
 func New(cfg *Config, log *slog.Logger) *Server {
 	if cfg == nil {
 		cfg = &Config{}
@@ -42,25 +48,37 @@ func New(cfg *Config, log *slog.Logger) *Server {
 		log = slog.Default()
 	}
 
-	s := &Server{
-		cfg:             *cfg,
-		log:             log,
-		shutdownTimeout: defaultShutdownTimeout,
+	shutdownTimeout := defaultShutdownTimeout
+	if cfg.ShutdownTimeout > 0 {
+		shutdownTimeout = cfg.ShutdownTimeout
 	}
 
-	mux := http.NewServeMux()
-	s.registerRoutes(mux)
+	s := &Server{
+		log:             log,
+		shutdownTimeout: shutdownTimeout,
+	}
+
 	s.httpSrv = &http.Server{
-		Handler:           s.withLogging(mux),
+		Addr:              cfg.Addr,
+		Handler:           s.handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	return s
 }
 
+// handler builds the server's HTTP handler: routes registered on a fresh
+// ServeMux, wrapped with request-logging middleware.
+func (s *Server) handler() http.Handler {
+	mux := http.NewServeMux()
+	s.registerRoutes(mux)
+	return s.withLogging(mux)
+}
+
 // Serve accepts connections on ln, serving until ctx is cancelled, then
-// drains in-flight requests before returning. A listener/serve error
-// (other than a clean shutdown) is returned immediately without waiting
-// for ctx.
+// drains in-flight requests before returning. Use this when the caller
+// needs control over listener construction (e.g. binding an ephemeral
+// port in tests). A listener/serve error (other than a clean shutdown) is
+// returned immediately without waiting for ctx.
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	if s == nil {
 		return errors.New("server is nil")
@@ -68,16 +86,35 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	if ln == nil {
 		return errors.New("listener is nil")
 	}
+	return s.serve(ctx, ln.Addr().String(), func() error { return s.httpSrv.Serve(ln) })
+}
 
+// ListenAndServe listens on the server's configured Addr (see Config) and
+// serves until ctx is cancelled, then drains in-flight requests. It
+// mirrors http.Server.ListenAndServe, which reads Addr off the receiver
+// rather than taking it as an argument.
+func (s *Server) ListenAndServe(ctx context.Context) error {
+	if s == nil {
+		return errors.New("server is nil")
+	}
+	if s.httpSrv.Addr == "" {
+		return errors.New("listen address is empty")
+	}
+	return s.serve(ctx, s.httpSrv.Addr, s.httpSrv.ListenAndServe)
+}
+
+// serve runs listen in a goroutine, logs the bind address, and drains
+// in-flight requests via Shutdown once ctx is cancelled or listen fails.
+func (s *Server) serve(ctx context.Context, addr string, listen func() error) error {
 	errCh := make(chan error, 1)
 	go func() {
 		defer close(errCh)
-		if err := s.httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := listen(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 	}()
 
-	s.log.Info("server listening", "addr", ln.Addr().String())
+	s.log.Info("server listening", "addr", addr)
 
 	select {
 	case err := <-errCh:

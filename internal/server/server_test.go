@@ -13,12 +13,29 @@ import (
 
 func TestNew(t *testing.T) {
 	tests := []struct {
-		name string
-		cfg  *Config
-		log  *slog.Logger
+		name        string
+		cfg         *Config
+		log         *slog.Logger
+		wantAddr    string
+		wantTimeout time.Duration
 	}{
-		{"nil cfg and nil log use defaults", nil, nil},
-		{"explicit cfg and explicit log", &Config{Addr: "127.0.0.1", Port: 8080}, slog.New(slog.NewTextHandler(io.Discard, nil))},
+		{
+			name:        "nil cfg and nil log use defaults",
+			cfg:         nil,
+			log:         nil,
+			wantAddr:    "",
+			wantTimeout: defaultShutdownTimeout,
+		},
+		{
+			name: "explicit cfg and explicit log",
+			cfg: &Config{
+				Addr:            "127.0.0.1:8080",
+				ShutdownTimeout: 2 * time.Second,
+			},
+			log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+			wantAddr:    "127.0.0.1:8080",
+			wantTimeout: 2 * time.Second,
+		},
 	}
 
 	for _, tt := range tests {
@@ -32,6 +49,12 @@ func TestNew(t *testing.T) {
 			}
 			if s.log == nil {
 				t.Fatal("expected non-nil logger")
+			}
+			if s.httpSrv.Addr != tt.wantAddr {
+				t.Errorf("httpSrv.Addr = %q, want %q", s.httpSrv.Addr, tt.wantAddr)
+			}
+			if s.shutdownTimeout != tt.wantTimeout {
+				t.Errorf("shutdownTimeout = %v, want %v", s.shutdownTimeout, tt.wantTimeout)
 			}
 		})
 	}
@@ -127,5 +150,43 @@ func TestServer_Serve_ListenerError(t *testing.T) {
 	err = srv.Serve(ctx, ln)
 	if err == nil {
 		t.Fatal("expected error on closed listener, got nil")
+	}
+}
+
+func TestServer_ListenAndServe_NilServer(t *testing.T) {
+	var s *Server
+	if err := s.ListenAndServe(context.Background()); err == nil {
+		t.Fatal("expected error on nil receiver, got nil")
+	}
+}
+
+func TestServer_ListenAndServe_EmptyAddr(t *testing.T) {
+	s := New(&Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := s.ListenAndServe(context.Background()); err == nil {
+		t.Fatal("expected error on empty addr, got nil")
+	}
+}
+
+func TestServer_ListenAndServe_ShutdownOnCancel(t *testing.T) {
+	srv := New(&Config{Addr: "127.0.0.1:0"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.ListenAndServe(ctx)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("ListenAndServe returned unexpected error on shutdown: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("ListenAndServe did not exit within 3 seconds of context cancellation")
 	}
 }
