@@ -2,17 +2,16 @@
 
 A Go CLI that summarizes morning news and stock moves via an LLM briefing.
 
-> **Status: Phase 1 complete, Phases 2–7 planned.** Roadmap slice 1 (client/server scaffold) is in place with the base HTTP endpoints and CLI plumbing. News, LLM, stocks, TUI, and settings (Phases 2–7) are planned — see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for system architecture and [docs/PRODUCT.md](docs/PRODUCT.md) for feature specifications.
+> See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for system architecture and [docs/PRODUCT.md](docs/PRODUCT.md) for feature specifications.
 
 ## Documents
 
 | Document | Purpose |
 |---|---|
-| [docs/PRODUCT.md](docs/PRODUCT.md) | **Canonical product specification** — features, behavior, API, roadmap |
-| [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) | Implementation guide, Phases 1–7 (mechanics, lifecycle, verification) |
+| [docs/PRODUCT.md](docs/PRODUCT.md) | **Canonical product specification** — features, behavior, API |
 | [AGENTS.md](AGENTS.md) | Agent development guidelines (follow when implementing) |
 
-**Precedence**: for product behavior, `docs/PRODUCT.md` wins; for implementation mechanics, `docs/IMPLEMENTATION.md` wins. The Obsidian note `Projects/Morning Brief CLI.md` is superseded by `docs/PRODUCT.md`.
+**Precedence**: `docs/PRODUCT.md` wins for product behavior. The Obsidian note `Projects/Morning Brief CLI.md` is superseded by `docs/PRODUCT.md`.
 
 ## Development
 

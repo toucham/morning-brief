@@ -8,8 +8,7 @@ This is the LLM-agnostic `AGENTS.md` standard — the agent-facing counterpart t
 
 | Document | Purpose |
 |----------|---------|
-| **[docs/PRODUCT.md](docs/PRODUCT.md)** | **Canonical product specification** — features, behavior, API, roadmap. Wins over all other docs for product behavior |
-| **[docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md)** | System implementation guide (Phases 1–7): directory layout, config structs, spawn/detect/stop lifecycle, CLI resolution flow, news/LLM/stocks/briefing/TUI/settings mechanics, verification plan. Wins over other docs for implementation mechanics |
+| **[docs/PRODUCT.md](docs/PRODUCT.md)** | **Canonical product specification** — features, behavior, API. Wins over all other docs for product behavior |
 | **[doc/ARCHITECTURE.md](.doc/ARCHITECTURE.md)** | Project structure, when to create packages/structs/interfaces, domain logic placement, package boundaries |
 | **[.agents/CODE_STYLE.md](.agents/CODE_STYLE.md)** | Naming conventions, documentation, comments, code organization, nil checks |
 | **[.agents/DESIGN_PATTERNS.md](.agents/DESIGN_PATTERNS.md)** | Dependency injection, error handling, interfaces, composition, concurrency, testing patterns |
@@ -21,8 +20,7 @@ This is the LLM-agnostic `AGENTS.md` standard — the agent-facing counterpart t
 
 ### Before Writing Code
 1. Read **[docs/PRODUCT.md](docs/PRODUCT.md)** to understand the product behavior you are implementing (it wins for behavior)
-2. Read **[docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md)** to understand the scope and mechanics of the phase you are implementing (Phases 1–7)
-3. Check **[.agents/DESIGN_PATTERNS.md](.agents/DESIGN_PATTERNS.md)** for the appropriate patterns
+2. Check **[.agents/DESIGN_PATTERNS.md](.agents/DESIGN_PATTERNS.md)** for the appropriate patterns
 
 ### While Writing Code
 1. Apply naming conventions from **[.agents/CODE_STYLE.md](.agents/CODE_STYLE.md)**
@@ -35,7 +33,7 @@ This is the LLM-agnostic `AGENTS.md` standard — the agent-facing counterpart t
 ### After Writing Code
 Use this **Code Review Checklist** before submitting:
 
-- [ ] Package organization matches the Phase 1 layout `cmd/{cli,server}` + `internal/{api,client,config,server}` (later phases add `render`, `news`, `stocks`, `briefing`, `llm` — see docs/PRODUCT.md and doc/ARCHITECTURE.md)
+- [ ] Package organization matches the layout defined in [docs/ARCHITECTURE.md §2](docs/ARCHITECTURE.md#2-target-package-structure--dependency-invariants): `cmd/{cli,server}` + `internal/{client,render,server,auth,store,briefing,news,stocks,llm}`
 - [ ] All exports have doc comments (see [.agents/CODE_STYLE.md](.agents/CODE_STYLE.md))
 - [ ] Errors are wrapped with context using `fmt.Errorf("%w", ...)`
 - [ ] No boolean error flags (`hasError`/`isError`); return an `error` value instead
@@ -58,7 +56,7 @@ Use this **Code Review Checklist** before submitting:
 
 ### Architecture
 - **Thin cmd/, thick internal/**: Entrypoints only in `cmd/`; all logic in `internal/` (Cobra command definitions in `cmd/cli` are the sanctioned exception)
-- **One responsibility per package**: `client`, `server`, `config`, `api`
+- **One responsibility per package**: `client`, `server`, `config`
 - **Platforms**: macOS and Linux only; do not add or imply Windows support
 - **Concrete-first, consumer-defined interfaces**: start with concrete types; add a small interface in the consuming package only when a second implementation or a test double genuinely needs one
 

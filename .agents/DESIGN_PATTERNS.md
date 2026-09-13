@@ -6,7 +6,7 @@
 
 ### Constructor Injection (Standard Pattern, Concrete First)
 ```go
-// Phase 1: Inject concrete types
+// Inject concrete types
 package server
 
 type Server struct {
@@ -29,7 +29,7 @@ func (m *mockHTTPClient) Do(req *http.Request) (*http.Response, error) {
     return m.doFn(req)
 }
 
-// Later (Phase 2+, with proof): If internal/llm needs multiple providers (Claude/OpenAI/Ollama)
+// Later, with proof: If internal/llm needs multiple providers (Claude/OpenAI/Ollama)
 package llm
 
 type Provider interface {
@@ -272,11 +272,10 @@ func (cs *ChildService) Init() {
 
 ## Graceful Shutdown (Idiomatic Go 1.21+)
 
-This pattern is what makes `cmd/server` stoppable: OS signals (SIGINT/SIGTERM) trigger graceful context cancellation, stopping the server cleanly without dropping in-flight requests. Use `signal.NotifyContext` to handle cancellation. In Phase 1 this state machine lives in `internal/server.Serve`, with `cmd/server` keeping only the flag/listener/signal wiring.
+This pattern is what makes `cmd/server` stoppable: OS signals (SIGINT/SIGTERM) trigger graceful context cancellation, stopping the server cleanly without dropping in-flight requests. Use `signal.NotifyContext` to handle cancellation. This state machine — including listener construction — lives in `internal/server.Serve`/`ListenAndServe`, with `cmd/server` keeping only flag/signal wiring and Config assembly.
 
 ```go
-// cmd/server/main.go (simplified; the Phase 1 flow in ../docs/IMPLEMENTATION.md also
-// publishes the runtime state file after a successful bind)
+// cmd/server/main.go (simplified graceful shutdown example)
 package main
 
 import (
@@ -449,7 +448,7 @@ func main() {
 // processAlive is a trivalent liveness HINT only — (true, nil) alive,
 // (false, nil) definitively dead, (false, err) unknown. Ownership of a managed
 // server is proven by the /healthz instance token, and callers must treat
-// "unknown" as foreign, never as dead (see ../docs/IMPLEMENTATION.md).
+// "unknown" as foreign, never as dead.
 func TestProcessAlive(t *testing.T) {
     tests := []struct {
         name    string
@@ -475,10 +474,10 @@ func TestProcessAlive(t *testing.T) {
 ```
 
 ### Mock Interfaces
-Phase 1's `Server`, `Client`, and `Config` are concrete with one implementation each — HTTP behavior is tested against `httptest.Server`, not mocks. Interfaces appear when a genuine second implementation or test-substitution need exists (e.g. LLM providers in Phase 2+), defined in the consuming package:
+`Server`, `Client`, and `Config` are concrete with one implementation each — HTTP behavior is tested against `httptest.Server`, not mocks. Interfaces appear when a genuine second implementation or test-substitution need exists (e.g. LLM providers), defined in the consuming package:
 
 ```go
-// internal/server (consumer defines the interface — Phase 2+, when /brief
+// internal/server (consumer defines the interface, when /brief
 // does real work)
 type BriefingGenerator interface {
     Generate(ctx context.Context, req *api.BriefRequest) (*api.BriefResponse, error)

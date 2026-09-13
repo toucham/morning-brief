@@ -36,7 +36,7 @@ Use for functions with multiple input/output cases. Reduces boilerplate and impr
 
 ```go
 // processAlive is a liveness hint only — ownership is additionally proven by
-// the /healthz instance token (see ../docs/IMPLEMENTATION.md, Spawn / Detect / Stop).
+// the /healthz instance token.
 func TestProcessAlive(t *testing.T) {
     tests := []struct {
         name string
@@ -129,7 +129,7 @@ func TestServer_CallsGenerator(t *testing.T) {
 
 ### Test Both Success and Failure Paths
 
-Config contract (per ../docs/IMPLEMENTATION.md): **missing file is not an error** — load returns the zero value. Only malformed content is an error.
+Config contract: **missing file is not an error** — load returns the zero value. Only malformed content is an error.
 
 ```go
 func TestLoadConfig_Success(t *testing.T) {

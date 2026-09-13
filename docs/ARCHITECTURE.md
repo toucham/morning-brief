@@ -84,10 +84,6 @@ flowchart TD
         ClientPkg["internal/client (HTTP API Client)"]
     end
 
-    subgraph Shared["Shared Protocol"]
-        APIPkg["internal/api (Wire Types & Protocol Constants)"]
-    end
-
     subgraph CoreServer["Server Domain"]
         ServerPkg["internal/server (HTTP Handlers & Middleware)"]
         AuthPkg["internal/auth (API Key Verification)"]
@@ -100,14 +96,12 @@ flowchart TD
 
     CmdCLI --> RenderPkg
     CmdCLI --> ClientPkg
-    ClientPkg --> APIPkg
 
     CmdServer --> ServerPkg
     CmdServer --> StorePkg
     ServerPkg --> AuthPkg
     ServerPkg --> BriefingPkg
     ServerPkg --> StorePkg
-    ServerPkg --> APIPkg
 
     AuthPkg --> StorePkg
 
@@ -120,9 +114,6 @@ flowchart TD
     StocksPkg --> LLMPkg
     NewsPkg --> StorePkg
     StocksPkg --> StorePkg
-    NewsPkg --> APIPkg
-    StocksPkg --> APIPkg
-    LLMPkg --> APIPkg
 ```
 
 ### Dependency Invariants
@@ -130,8 +121,7 @@ flowchart TD
 2. `internal/news` and `internal/stocks` import `internal/llm` for summarization and catalyst explanations, and `internal/store` for reading account configurations.
 3. `internal/server` defines consumer interfaces (such as `BriefingGenerator`) implemented by `internal/briefing`, allowing isolated unit testing of handlers via test doubles.
 4. `internal/auth` handles token parsing and identity resolution, querying `internal/store` to match keys to account identities.
-5. `internal/api` contains pure DTO wire types and depends strictly on the standard library.
-6. Neither `cmd/cli` nor `cmd/server` relies on a shared `config` package; each parses flags and environment variables directly and injects typed parameters into constructors.
+5. Neither `cmd/cli` nor `cmd/server` relies on a shared `config` package; each parses flags and environment variables directly and injects typed parameters into constructors.
 
 ---
 
