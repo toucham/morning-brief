@@ -8,6 +8,9 @@
 *.so
 *.dylib
 
+# Built binaries (local development builds)
+bin/
+
 # Test binary, built with `go test -c`
 *.test
 

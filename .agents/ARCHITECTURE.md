@@ -7,10 +7,11 @@ cmd/
   cli/          # CLI entrypoint (Cobra commands, flag parsing)
   server/       # Server entrypoint (HTTP listener setup)
 internal/
-  api/          # Wire types: BriefRequest, BriefResponse
-  client/       # HTTP client, spawn/detect, lockfile, server management
-  config/       # Config structs, XDG paths, load/save
-  server/       # HTTP handlers, routing, server lifecycle
+  api/          # Wire types: BriefRequest, BriefResponse, HealthResponse
+  client/       # HTTP client, spawn/detect/stop lifecycle orchestration
+  config/       # Config structs, paths, load/save
+  server/       # HTTP handlers, routing, server lifecycle (serving + bounded shutdown)
+  state/        # Runtime state file (atomic publication, validation) + lifecycle lock
 ```
 
 **Rule**: `cmd/` contains only entrypoints and command wiring. All logic lives in `internal/`.
@@ -25,17 +26,23 @@ internal/
 3. **Testable in isolation**: Can be tested without bringing in unrelated code
 
 ### Keep in existing package when:
-- Logic is tightly coupled (e.g., lockfile handling stays in `client/` since spawn/detect need it)
+- Logic is tightly coupled (e.g., spawn-readiness polling stays in `client/` since only spawn uses it)
 - Fewer than 2-3 callers (not worth the package overhead)
 - Still under ~600 lines (file is more natural boundary than package)
+
+Note: the runtime state file is a deliberate exception — it lives in its own `state/` package because **both** `internal/client` (verify/remove) and `cmd/server` (publish) need it, and both `client` and `server` are otherwise forbidden from importing each other.
 
 ### Example: When to split
 ```
 internal/client/
-  client.go        # HTTP client, Brief()
-  spawn.go         # EnsureLocalServer(), locateServerBinary()
-  lockfile.go      # Lockfile struct, Read/Write/IsAlive()
-  stop.go          # StopLocalServer()
+  client.go        // HTTP client: Brief(), Health(), Shutdown()
+  ensure.go        // EnsureLocalServer(), locateServerBinary()
+  stop.go          // StopLocalServer()
+  process.go       // processAlive() + injectable process ops
+
+internal/state/
+  statefile.go     // StateFile struct, Valid(), ReadStateFile/CreateStateFile/RemoveStateFile
+  lock.go          // lifecycle lock (flock) acquire/release
 ```
 
 Each file in `client/` is `package client`. Don't create `internal/client/spawn/spawn.go`—that's over-engineering.
@@ -45,9 +52,9 @@ Each file in `client/` is `package client`. Don't create `internal/client/spawn/
 ## Where Domain Logic Lives
 
 ### Domain Logic = `internal/`
-- **Business rules**: How to spawn a server, when a lockfile is stale, how to detect reuse
-- **Data models**: Config structs, Lockfile, BriefResponse
-- **Interfaces**: Define what the server needs from the client, what the client needs from config
+- **Business rules**: How to spawn a server, when a runtime state file is stale, how to detect reuse
+- **Data models**: Config structs, StateFile, BriefResponse
+- **Interfaces**: consumer-defined, added only when a genuine second implementation or a test double needs one (see "When to Create an Interface" below)
 
 ### Entrypoint = `cmd/`
 - **Parse flags**: CLI arguments
@@ -63,8 +70,11 @@ func main() {
         log.Fatal(err)
     }
     
-    client := client.NewClient(baseURL)    // Wire from internal/
-    resp, err := client.Brief(ctx, req)    // Call domain logic
+    client, err := client.NewClient(baseURL, nil) // Wire from internal/
+    if err != nil {
+        log.Fatal(err)
+    }
+    resp, err := client.Brief(ctx, &api.BriefRequest{}) // Call domain logic
     if err != nil {
         log.Fatal(err)
     }
@@ -72,7 +82,7 @@ func main() {
 
 // Bad: Domain logic in main.go
 func main() {
-    // ... 100 lines of spawn/detect/lockfile logic here ...
+    // ... 100 lines of spawn/detect/state-file logic here ...
 }
 ```
 
@@ -82,15 +92,16 @@ func main() {
 
 ### Create a struct when you need to:
 1. **Group related data**: Config fields, Client state, Server state
-2. **Attach methods**: Server needs `Handler()`, `ListenAndServe()`
+2. **Attach methods**: Server needs `Handler()`, `Serve(ctx, ln)`
 3. **Pass as function argument**: Cleaner than 5 separate parameters
 
 ```go
 // Good: Related data grouped
-type Lockfile struct {
+type StateFile struct {
     PID       int
     Address   string
     StartedAt time.Time
+    Token     string
 }
 
 type Client struct {
@@ -99,9 +110,9 @@ type Client struct {
 }
 
 // Bad: Scattered data
-var lockfilePID int
-var lockfileAddr string
-var lockfileStart time.Time
+var statePID int
+var stateAddr string
+var stateStart time.Time
 ```
 
 ### When NOT to create a struct:
@@ -126,10 +137,11 @@ type Server struct {
     config config.ServerConfig
 }
 
-// Also good: Mock interfaces *discovered* when testing needs one
-// (in _test.go, not main code)
-type mockHTTPClient struct {
-    doFn func(*http.Request) (*http.Response, error)
+// Also good: test doubles *discovered* when testing needs one
+// (in _test.go, not main code). HTTP behavior is tested against
+// httptest.Server against the real *http.Client — no mock needed.
+type mockBriefingGenerator struct {
+    generateFn func(ctx context.Context, req *api.BriefRequest) (*api.BriefResponse, error)
 }
 
 // Future (Phase 2+): Internal/llm will have multiple providers → interface is justified
@@ -148,19 +160,21 @@ type Provider interface {
 
 | Package | Responsibility | Imports | Exported |
 |---------|---|---|---|
-| `api` | Wire types (JSON-marshaled) | stdlib only | BriefRequest, BriefResponse |
-| `config` | Load/save YAML config, path helpers | stdlib, yaml.v3 | ClientConfig, ServerConfig, paths |
-| `client` | HTTP client, spawn/detect, lockfile | stdlib, api, config | Client, EnsureLocalServer, StopLocalServer |
-| `server` | HTTP handlers, routing, Server lifecycle | stdlib, api, config | Server, New, Handler |
-| `cmd/cli` | Cobra commands, CLI entrypoint | cobra, client, config | main() |
-| `cmd/server` | Server entrypoint, signal handling | stdlib, server, config | main() |
+| `api` | Wire types (JSON-marshaled) + protocol constants | stdlib only | BriefRequest, BriefResponse, HealthResponse, ErrorResponse, ProtocolVersion |
+| `config` | Load client YAML + narrow transactional updates; load server YAML; path helpers | stdlib, yaml.v3, x/sys (config lock) | ClientConfig, ServerConfig, ServerProfile, SetServerConnection(To), ClearServerURL(To), LoadClientConfig(From), LoadServerConfig(From), paths |
+| `state` | Runtime state file (atomic publication, validation) + lifecycle lock + LifecyclePaths | stdlib, x/sys (flock) — no other internal packages | StateFile, CreateStateFile/ReadStateFile/RemoveStateFile, LifecyclePaths, lifecycle lock |
+| `client` | HTTP client, spawn/detect/stop lifecycle orchestration | stdlib, api, config, state | Client, EnsureLocalServer, StopLocalServer, EnsureOpts, EnsureResult, sentinels |
+| `server` | HTTP handlers, routing, Serve + bounded shutdown | stdlib, api, config | Server, New, Handler, Serve |
+| `cmd/cli` | Cobra commands, CLI entrypoint | cobra, api, client, config | main() |
+| `cmd/server` | Server entrypoint, signal handling, state publication wiring | stdlib, server, config, state | main() |
 
 **Import rules**:
 - `cmd/` imports `internal/` only
-- `internal/server` imports `api`, `config`, stdlib (not `client`)
-- `internal/client` imports `api`, `config`, stdlib (not `server`)
+- `internal/server` imports `api`, `config`, stdlib (not `client`, not `state`)
+- `internal/client` imports `api`, `config`, `state`, stdlib (not `server`)
+- `internal/state` imports stdlib + x/sys only (no other internal packages)
 - `internal/api` imports stdlib only
-- `internal/config` imports stdlib, yaml.v3 only
+- `internal/config` imports stdlib, yaml.v3, x/sys only
 
 **No circular imports**: If A imports B, B cannot import A. Enforce this.
 
@@ -172,27 +186,37 @@ When adding features (news, stocks, LLM), keep this pattern:
 
 ```
 internal/
-  api/              # Add NewsRequest, NewsResponse, StockResponse
+  api/              # Add NewsRequest, NewsResponse, StockResponse wire types
   client/           # (no change for local client)
-  server/           # Add /news, /stocks handlers
+  server/           # Add /news, /stocks, /news/summary handlers
+  state/            # (no change)
   config/           # Add news.* and stocks.* config fields
   news/             # NEW: fetch & filter news (internal only)
   stocks/           # NEW: fetch stocks & compute moves (internal only)
   briefing/         # NEW: orchestrate news + stocks into briefing
+  llm/              # NEW: provider abstraction + tool interface/registry (per ../docs/PRODUCT.md)
+  render/           # NEW: CLI-side terminal UI (Bubble Tea) and markdown page writer
 ```
+
+**Dependency direction (normative — see ../docs/PRODUCT.md, Architecture)**: `internal/llm` defines the tool interface/registry and never imports `news`/`stocks`; `news`/`stocks` import `llm`; `briefing` composes fetchers as tools. No import cycles.
 
 Domain logic (`news/`, `stocks/`, `briefing/`) lives in `internal/`. The server wires it:
 
 ```go
-// cmd/server/main.go
+// cmd/server/main.go (illustrative; exact constructor signature evolves per phase)
 func main() {
-    // ... load config, wire server ...
+    // ... load config, wire server, start listener, signal context, publish state ...
     newsService := news.NewService(config)
     stocksService := stocks.NewService(config)
     briefingService := briefing.NewService(newsService, stocksService)
-    
-    srv := server.NewServer(briefingService)
-    srv.ListenAndServe()
+    // briefingService also registers news/stocks fetchers as LLM tools
+
+    // Domain services are injected into the server: internal/server owns the
+    // consumer-side interfaces (e.g. BriefingGenerator) and never imports
+    // news/stocks/briefing directly. Phase 1's server.New(cfg, token, log)
+    // takes no services — /brief is a stub.
+    srv := server.New(config, token, logger, briefingService)
+    srv.Serve(ctx, ln)
 }
 ```
 
@@ -210,10 +234,10 @@ internal/util/
 
 // Good: Specific, named packages or helper functions in the package that uses them
 internal/client/
-  backoff.go     # waitForReady uses backoff; keep it here
+  backoff.go     // spawn readiness polling uses backoff; keep it here
   
 internal/config/
-  format.go      # path formatting helpers; keep in config package
+  format.go      // path formatting helpers; keep in config package
 ```
 
 ---

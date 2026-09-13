@@ -13,7 +13,7 @@ type Server struct {
     config config.ServerConfig
 }
 
-func NewServer(cfg config.ServerConfig) *Server {
+func New(cfg config.ServerConfig) *Server {
     return &Server{config: cfg}
 }
 
@@ -42,7 +42,7 @@ type Server struct {
     provider llm.Provider  // NOW justify an interface
 }
 
-func NewServer(provider llm.Provider, cfg config.ServerConfig) *Server {
+func New(provider llm.Provider, cfg config.ServerConfig) *Server {
     return &Server{provider: provider, config: cfg}
 }
 ```
@@ -203,7 +203,7 @@ func fetch(url string) ([]byte, error) {
     if err != nil {
         return nil, fmt.Errorf("fetch: %w", err)  // Wrap
     }
-    return ioutil.ReadAll(resp.Body)
+    return io.ReadAll(resp.Body)
 }
 
 func process(url string) (Result, error) {
@@ -272,14 +272,18 @@ func (cs *ChildService) Init() {
 
 ## Graceful Shutdown (Idiomatic Go 1.21+)
 
-This pattern applies to `cmd/server` to enable `morning server stop` via SIGTERM. Use `signal.NotifyContext` to cancel operations cleanly.
+This pattern is what makes `cmd/server` stoppable: OS signals (SIGINT/SIGTERM) stop a manually-run server, and the *same* context-cancellation path is taken when an authenticated `POST /shutdown` (what `morning server stop` sends, after identity verification) triggers the internal shutdown. Use `signal.NotifyContext` to cancel operations cleanly. In Phase 1 this state machine lives in `internal/server.Serve` (see `../docs/IMPLEMENTATION.md`), with `cmd/server` keeping only the flag/listener/signal wiring.
 
 ```go
-// cmd/server/main.go
+// cmd/server/main.go (simplified; the Phase 1 flow in ../docs/IMPLEMENTATION.md also
+// publishes the runtime state file after a successful bind)
 package main
 
 import (
     "context"
+    "errors"
+    "fmt"
+    "net"
     "net/http"
     "os"
     "os/signal"
@@ -292,21 +296,34 @@ func main() {
     ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
     defer stop()
 
-    // Start server in a goroutine
-    httpSrv := &http.Server{Addr: ":8787", Handler: http.NewServeMux()}
+    ln, err := net.Listen("tcp", "127.0.0.1:8787")
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "listen: %v\n", err)
+        os.Exit(1) // a bind failure is fatal, not a log-and-wait
+    }
+
+    httpSrv := &http.Server{
+        Handler:           http.NewServeMux(),
+        ReadHeaderTimeout: 5 * time.Second,
+    }
+    errCh := make(chan error, 1)
     go func() {
-        if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-            fmt.Fprintf(os.Stderr, "server error: %v\n", err)
+        if err := httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+            errCh <- err // listener failure must surface, not be swallowed
         }
     }()
 
-    // Wait for shutdown signal
-    <-ctx.Done()
+    // Wait for shutdown signal OR a fatal listener error — never just the signal
+    select {
+    case err := <-errCh:
+        fmt.Fprintf(os.Stderr, "server error: %v\n", err)
+        os.Exit(1)
+    case <-ctx.Done():
+    }
 
     // Graceful shutdown with timeout
     shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
     defer cancel()
-    
     if err := httpSrv.Shutdown(shutdownCtx); err != nil {
         fmt.Fprintf(os.Stderr, "shutdown error: %v\n", err)
     }
@@ -317,7 +334,8 @@ func main() {
 - `signal.NotifyContext` converts SIGTERM/SIGINT into a context cancellation — no manual signal handling needed.
 - `http.Server.Shutdown(ctx)` gracefully stops accepting new connections and waits for active handlers to finish.
 - The timeout prevents the server from hanging forever — if shutdown takes >5s, it hard-stops anyway.
-- This is what `morning server stop` (sending SIGTERM to the spawned process) triggers.
+- **Listener errors are selected on alongside the signal**: a bind/serve failure must exit non-zero, not be printed while main blocks forever on `<-ctx.Done()`.
+- `morning server stop` triggers this path via an authenticated `POST /shutdown` to the verified instance — it never sends SIGTERM to a PID read from the state file. A manual `kill` still works through the signal context.
 
 ---
 
@@ -331,7 +349,7 @@ func main() {
 // Good: Construct once, pass explicitly
 func main() {
     logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-    server := server.NewServer(cfg, logger)
+    server := server.New(cfg, token, logger)
     // ...
 }
 
@@ -373,14 +391,15 @@ func main() {
 }
 
 func run(ctx context.Context, args []string) int {
-    cmd := cmd.NewRootCmd()  // Cobra setup here, testable
+    cmd := newRootCmd() // unexported Cobra builder in the same package — testable
     if err := cmd.ExecuteContext(ctx); err != nil {
         return 1
     }
     return 0
 }
 
-// Good: cmd/server/main.go
+// Good: cmd/server/main.go (simplified — see the Graceful Shutdown example
+// above for the listener-error channel pattern)
 package main
 
 import (
@@ -393,14 +412,19 @@ func main() {
 }
 
 func run(ctx context.Context) int {
-    cfg, err := config.Load()
+    // Signal handling lives in the entrypoint, derived from the passed-in ctx
+    // (never context.Background()) so tests can cancel run directly.
+    ctx, stopSignals := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+    defer stopSignals()
+
+    cfg, err := config.LoadServerConfig()
     if err != nil {
         fmt.Fprintf(os.Stderr, "config error: %v\n", err)
         return 1
     }
-    
-    srv := server.New(cfg)
-    if err := srv.ListenAndServe(ctx); err != nil {
+
+    srv := server.New(cfg, token, logger)
+    if err := srv.Serve(ctx, ln); err != nil {
         fmt.Fprintf(os.Stderr, "server error: %v\n", err)
         return 1
     }
@@ -422,22 +446,28 @@ func main() {
 
 ### Table-Driven Tests
 ```go
-func TestIsAlive(t *testing.T) {
+// processAlive is a trivalent liveness HINT only — (true, nil) alive,
+// (false, nil) definitively dead, (false, err) unknown. Ownership of a managed
+// server is proven by the /healthz instance token, and callers must treat
+// "unknown" as foreign, never as dead (see ../docs/IMPLEMENTATION.md).
+func TestProcessAlive(t *testing.T) {
     tests := []struct {
         name    string
         pid     int
-        signal  os.Signal
         want    bool
+        wantErr bool
     }{
-        {"valid pid", 1234, syscall.Signal(0), true},
-        {"invalid pid", -1, syscall.Signal(0), false},
+        {"own pid", os.Getpid(), true, false},
+        {"negative pid", -1, false, true},
+        {"zero pid", 0, false, true},
     }
-    
+
     for _, tt := range tests {
         t.Run(tt.name, func(t *testing.T) {
-            got := IsAlive(tt.pid, tt.signal)
-            if got != tt.want {
-                t.Errorf("got %v, want %v", got, tt.want)
+            got, err := processAlive(tt.pid)
+            if got != tt.want || (err != nil) != tt.wantErr {
+                t.Errorf("processAlive(%d) = (%v, %v), want (%v, %v)",
+                    tt.pid, got, err != nil, tt.want, tt.wantErr)
             }
         })
     }
@@ -445,25 +475,33 @@ func TestIsAlive(t *testing.T) {
 ```
 
 ### Mock Interfaces
+Phase 1's `Server`, `Client`, and `Config` are concrete with one implementation each — HTTP behavior is tested against `httptest.Server`, not mocks. Interfaces appear when a genuine second implementation or test-substitution need exists (e.g. LLM providers in Phase 2+), defined in the consuming package:
+
 ```go
-// Test double in _test.go
-type MockBriefGenerator struct {
-    GenerateFn func(ctx context.Context, req *api.BriefRequest) (*api.BriefResponse, error)
+// internal/server (consumer defines the interface — Phase 2+, when /brief
+// does real work)
+type BriefingGenerator interface {
+    Generate(ctx context.Context, req *api.BriefRequest) (*api.BriefResponse, error)
 }
 
-func (m *MockBriefGenerator) Generate(ctx context.Context, req *api.BriefRequest) (*api.BriefResponse, error) {
-    return m.GenerateFn(ctx, req)
+// Test double in _test.go
+type mockBriefingGenerator struct {
+    generateFn func(ctx context.Context, req *api.BriefRequest) (*api.BriefResponse, error)
+}
+
+func (m *mockBriefingGenerator) Generate(ctx context.Context, req *api.BriefRequest) (*api.BriefResponse, error) {
+    return m.generateFn(ctx, req)
 }
 
 // Use in test
-func TestServer(t *testing.T) {
-    mock := &MockBriefGenerator{
-        GenerateFn: func(ctx context.Context, req *api.BriefRequest) (*api.BriefResponse, error) {
+func TestBriefHandler(t *testing.T) {
+    mock := &mockBriefingGenerator{
+        generateFn: func(ctx context.Context, req *api.BriefRequest) (*api.BriefResponse, error) {
             return &api.BriefResponse{Message: "test"}, nil
         },
     }
-    srv := server.NewServer(mock)
-    // Test srv...
+    srv := server.New(config.ServerConfig{}, "token", logger, mock) // injected via constructor
+    // ...
 }
 ```
 

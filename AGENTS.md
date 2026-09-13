@@ -4,11 +4,25 @@ This file contains development guidelines for implementing the morning-brief pro
 
 This is the LLM-agnostic `AGENTS.md` standard — the agent-facing counterpart to `README.md` (which is for humans). Detailed guidance lives in `.agents/` subdirectory.
 
+## Agent Discovery
+
+This file is the single source of truth for agent-facing guidelines and is auto-loaded by the agents below. **Do not duplicate its content** — keep the per-tool entry points as thin symlinks to this file so the rules are loaded on every session without manual prompting.
+
+| Agent | Entry point (symlink → `AGENTS.md`) |
+|-------|--------------------------------------|
+| OpenCode, Codex, Gemini, most AGENTS.md-aware tools | `AGENTS.md` (this file, read directly) |
+| Claude Code | `CLAUDE.md` |
+| Cursor | `.cursorrules` |
+| GitHub Copilot (agent mode) | `.github/copilot-instructions.md` |
+
+If you add a new agent tool that uses a different conventions file, add a symlink to this file and a row to the table above. The detailed style, architecture, design, and testing guides live in [`.agents/`](.agents/) and are referenced throughout this file.
+
 ## Quick Reference
 
 | Document | Purpose |
 |----------|---------|
-| **[IMPLEMENTATION.md](IMPLEMENTATION.md)** | Phase 1 detailed design: directory layout, config structs, spawn/lockfile logic, CLI resolution flow, verification plan |
+| **[docs/PRODUCT.md](docs/PRODUCT.md)** | **Canonical product specification** — features, behavior, API, roadmap. Wins over all other docs for product behavior |
+| **[docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md)** | System implementation guide (Phases 1–7): directory layout, config structs, spawn/detect/stop lifecycle, CLI resolution flow, news/LLM/stocks/briefing/TUI/settings mechanics, verification plan. Wins over other docs for implementation mechanics |
 | **[.agents/ARCHITECTURE.md](.agents/ARCHITECTURE.md)** | Project structure, when to create packages/structs/interfaces, domain logic placement, package boundaries |
 | **[.agents/CODE_STYLE.md](.agents/CODE_STYLE.md)** | Naming conventions, documentation, comments, code organization, nil checks |
 | **[.agents/DESIGN_PATTERNS.md](.agents/DESIGN_PATTERNS.md)** | Dependency injection, error handling, interfaces, composition, concurrency, testing patterns |
@@ -19,9 +33,10 @@ This is the LLM-agnostic `AGENTS.md` standard — the agent-facing counterpart t
 ## How to Use These Guides
 
 ### Before Writing Code
-1. Read **IMPLEMENTATION.md** to understand Phase 1 scope and design
-2. Read **[.agents/ARCHITECTURE.md](.agents/ARCHITECTURE.md)** to understand package structure and where your code belongs
-3. Check **[.agents/DESIGN_PATTERNS.md](.agents/DESIGN_PATTERNS.md)** for the appropriate patterns
+1. Read **[docs/PRODUCT.md](docs/PRODUCT.md)** to understand the product behavior you are implementing (it wins for behavior)
+2. Read **[docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md)** to understand the scope and mechanics of the phase you are implementing (Phases 1–7)
+3. Read **[.agents/ARCHITECTURE.md](.agents/ARCHITECTURE.md)** to understand package structure and where your code belongs
+4. Check **[.agents/DESIGN_PATTERNS.md](.agents/DESIGN_PATTERNS.md)** for the appropriate patterns
 
 ### While Writing Code
 1. Apply naming conventions from **[.agents/CODE_STYLE.md](.agents/CODE_STYLE.md)**
@@ -34,16 +49,21 @@ This is the LLM-agnostic `AGENTS.md` standard — the agent-facing counterpart t
 ### After Writing Code
 Use this **Code Review Checklist** before submitting:
 
-- [ ] Package organization matches `cmd/{cli,server}` + `internal/{api,client,config,server}`
+- [ ] Package organization matches the Phase 1 layout `cmd/{cli,server}` + `internal/{api,client,config,server,state}` (later phases add `render`, `news`, `stocks`, `briefing`, `llm` — see docs/PRODUCT.md and .agents/ARCHITECTURE.md)
 - [ ] All exports have doc comments (see [.agents/CODE_STYLE.md](.agents/CODE_STYLE.md))
 - [ ] Errors are wrapped with context using `fmt.Errorf("%w", ...)`
+- [ ] Error strings are lowercase with no trailing punctuation (e.g. `errors.New("state file is nil")`)
+- [ ] No boolean error flags (`hasError`/`isError`); return an `error` value instead
+- [ ] Initialisms are consistently cased (`apiURL`, `userID`, `ServeHTTP` — never `apiUrl`, `userId`)
+- [ ] Empty slices use the nil form `var s []T`; preallocate known capacities (`make([]T, 0, cap)`)
 - [ ] Nil checks use guard clauses (early returns)
-- [ ] Interfaces are small (1-3 methods) and defined in consumer packages
+- [ ] Concrete types by default; any interface is small (1-3 methods), consumer-defined, and justified by a second implementation or a test double; add a compile-time assertion (`var _ Iface = (*T)(nil)`) where a type is a contract implementer
 - [ ] No global state; dependencies injected via constructors
 - [ ] `context.Context` is first parameter for functions that need cancellation
 - [ ] Naming follows conventions: lowercase packages, CamelCase exports, consistent receivers
 - [ ] Tests use table-driven pattern where applicable
 - [ ] Deferred cleanup (`defer`) for files, locks, goroutines
+- [ ] Goroutine lifetimes are obvious: context-cancellable and synchronized exit (no fire-and-forget)
 - [ ] No panic for expected errors; return errors instead
 - [ ] Type assertions use comma-ok idiom (safe, not panicking)
 
@@ -52,21 +72,29 @@ Use this **Code Review Checklist** before submitting:
 ## Key Principles Summary
 
 ### Architecture
-- **Thin cmd/, thick internal/**: Entrypoints only in `cmd/`; all logic in `internal/`
-- **One responsibility per package**: `client`, `server`, `config`, `api`
-- **Define interfaces where consumed**: Consumer package owns interface definitions
+- **Thin cmd/, thick internal/**: Entrypoints only in `cmd/`; all logic in `internal/` (Cobra command definitions in `cmd/cli` are the sanctioned exception)
+- **One responsibility per package**: `client`, `server`, `config`, `api`, `state`
+- **Platforms**: macOS and Linux only; do not add or imply Windows support
+- **Concrete-first, consumer-defined interfaces**: start with concrete types; add a small interface in the consuming package only when a second implementation or a test double genuinely needs one
 
 ### Design
-- **Dependency injection**: Pass dependencies as constructor params, use interfaces
+- **Dependency injection**: Pass dependencies as constructor params; introduce consumer-owned interfaces only on proven need
 - **Error wrapping**: Add context using `fmt.Errorf("%w", ...)` as errors bubble up
-- **Small interfaces**: 1-3 methods; allows composition and easy mocking
+- **Small interfaces**: when one is added, 1-3 methods; allows composition and easy mocking
 - **Defer for cleanup**: Guarantees cleanup on early return
 
 ### Code Style
 - **Naming**: lowercase packages, CamelCase exports, consistent receivers (c, s, etc.)
+- **Initialisms**: consistent casing everywhere — `apiURL`, `userID`, `ServeHTTP` (never `apiUrl`, `userId`)
+- **Booleans**: clear adjectives/predicates; no boolean error flags — return an `error` value
+- **Error strings**: lowercase, no trailing punctuation; wrap with `%w`
+- **Slices**: prefer nil slices (`var s []T`); preallocate known capacities
+- **Interfaces**: consumer-defined, small, compile-time asserted (`var _ Iface = (*T)(nil)`)
+- **Goroutines**: obvious lifetimes — context-cancellable, synchronized exit
 - **Guard clauses**: Early returns reduce nesting
 - **Comments**: Explain why, not what; document all exports
 - **No global state**: Explicit dependencies
+- **Full reference**: [.agents/CODE_STYLE.md](.agents/CODE_STYLE.md)
 
 ### Testing
 - **Table-driven**: Multiple test cases in one test function

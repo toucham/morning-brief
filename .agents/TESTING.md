@@ -14,7 +14,10 @@ package client
 import "testing"
 
 func TestNewClient(t *testing.T) {
-    c := NewClient("http://localhost:8787")
+    c, err := NewClient("http://localhost:8787", nil)
+    if err != nil {
+        t.Fatalf("NewClient failed: %v", err)
+    }
     if c == nil {
         t.Fatal("expected non-nil client")
     }
@@ -32,22 +35,23 @@ func TestClient_Brief(t *testing.T) {
 Use for functions with multiple input/output cases. Reduces boilerplate and improves clarity.
 
 ```go
-func TestIsAlive(t *testing.T) {
+// processAlive is a liveness hint only — ownership is additionally proven by
+// the /healthz instance token (see ../docs/IMPLEMENTATION.md, Spawn / Detect / Stop).
+func TestProcessAlive(t *testing.T) {
     tests := []struct {
-        name    string
-        pid     int
-        want    bool
+        name string
+        pid  int
+        want bool
     }{
-        {"valid pid", 1234, true},
+        {"own pid", os.Getpid(), true},
         {"negative pid", -1, false},
         {"zero pid", 0, false},
     }
-    
+
     for _, tt := range tests {
         t.Run(tt.name, func(t *testing.T) {
-            got := IsAlive(tt.pid)
-            if got != tt.want {
-                t.Errorf("IsAlive(%d) = %v, want %v", tt.pid, got, tt.want)
+            if got := processAlive(tt.pid); got != tt.want {
+                t.Errorf("processAlive(%d) = %v, want %v", tt.pid, got, tt.want)
             }
         })
     }
@@ -60,31 +64,25 @@ func TestIsAlive(t *testing.T) {
 
 ## Testing with Interfaces & Mocks
 
-### Lightweight Mock Implementation
-Define test doubles directly in test files (not separate mock package).
+### Lightweight Test Doubles
+Define test doubles directly in test files (not a separate mock package). For HTTP clients that hold a concrete `*http.Client`, prefer `httptest.Server` over a mock — it exercises the real request/response path (URL joining, headers, decoding):
 
 ```go
 // In client_test.go
-type mockHTTPClient struct {
-    doFn func(req *http.Request) (*http.Response, error)
-}
-
-func (m *mockHTTPClient) Do(req *http.Request) (*http.Response, error) {
-    return m.doFn(req)
-}
-
-// Use in tests
 func TestBrief(t *testing.T) {
-    mock := &mockHTTPClient{
-        doFn: func(req *http.Request) (*http.Response, error) {
-            return &http.Response{
-                StatusCode: 200,
-                Body:       ioutil.NopCloser(bytes.NewReader([]byte(`{"message":"test"}`))),
-            }, nil
-        },
+    ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodPost || r.URL.Path != "/brief" {
+            t.Errorf("got %s %s, want POST /brief", r.Method, r.URL.Path)
+        }
+        w.Header().Set("Content-Type", "application/json")
+        fmt.Fprint(w, `{"generated_at":"2026-01-01T00:00:00Z","message":"test"}`)
+    }))
+    defer ts.Close()
+
+    c, err := NewClient(ts.URL, nil)
+    if err != nil {
+        t.Fatalf("NewClient failed: %v", err)
     }
-    
-    c := &Client{http: mock}
     resp, err := c.Brief(context.Background(), &api.BriefRequest{})
     if err != nil {
         t.Fatalf("Brief failed: %v", err)
@@ -94,6 +92,8 @@ func TestBrief(t *testing.T) {
     }
 }
 ```
+
+Use hand-rolled mock types (in `_test.go`) only for non-HTTP collaborators where a fake is genuinely needed (e.g. injected process/filesystem ops in the lifecycle code).
 
 ### Verify Mocks Were Called
 For behavior verification (e.g., "was X called with Y?"):
@@ -114,7 +114,7 @@ func TestServer_CallsGenerator(t *testing.T) {
         resp: &api.BriefResponse{Message: "test"},
     }
     
-    srv := server.NewServer(mock)
+    srv := server.New(mock, config.ServerConfig{})
     resp, err := srv.handleBrief(&api.BriefRequest{})
     
     if len(mock.calls) != 1 {
@@ -128,52 +128,62 @@ func TestServer_CallsGenerator(t *testing.T) {
 ## Testing Errors
 
 ### Test Both Success and Failure Paths
+
+Config contract (per ../docs/IMPLEMENTATION.md): **missing file is not an error** — load returns the zero value. Only malformed content is an error.
+
 ```go
 func TestLoadConfig_Success(t *testing.T) {
-    // Write a temp config file
     tmp := t.TempDir()
-    path := filepath.Join(tmp, "config.yaml")
-    ioutil.WriteFile(path, []byte("server:\n  url: http://localhost:8787"), 0644)
-    
-    cfg, err := LoadClientConfig(path)
+    path := filepath.Join(tmp, "client.yaml")
+    os.WriteFile(path, []byte("server:\n  url: http://localhost:8787"), 0600)
+
+    cfg, err := LoadClientConfigFrom(path)
     if err != nil {
-        t.Fatalf("LoadClientConfig failed: %v", err)
+        t.Fatalf("LoadClientConfigFrom failed: %v", err)
     }
     if cfg.Server.URL != "http://localhost:8787" {
         t.Errorf("got %q, want %q", cfg.Server.URL, "http://localhost:8787")
     }
 }
 
-func TestLoadConfig_NotFound(t *testing.T) {
-    cfg, err := LoadClientConfig("/nonexistent/path")
-    if err == nil {
-        t.Fatal("expected error, got nil")
+func TestLoadConfig_MissingFileIsNotAnError(t *testing.T) {
+    cfg, err := LoadClientConfigFrom(filepath.Join(t.TempDir(), "absent.yaml"))
+    if err != nil {
+        t.Fatalf("missing file must load as zero value, got error: %v", err)
     }
-    // Optionally check error type
-    if !errors.Is(err, os.ErrNotExist) {
-        t.Errorf("expected os.ErrNotExist, got %v", err)
+    if cfg != (ClientConfig{}) {
+        t.Errorf("expected zero value, got %+v", cfg)
+    }
+}
+
+func TestLoadConfig_Malformed(t *testing.T) {
+    tmp := t.TempDir()
+    path := filepath.Join(tmp, "client.yaml")
+    os.WriteFile(path, []byte("server: [unclosed"), 0600)
+
+    _, err := LoadClientConfigFrom(path)
+    if err == nil {
+        t.Fatal("expected error for malformed YAML, got nil")
     }
 }
 ```
 
 ### Check Error Messages
 ```go
-func TestIsAlive_ValidAndInvalidPID(t *testing.T) {
+func TestProcessAlive_ValidAndInvalidPID(t *testing.T) {
     tests := []struct {
-        name    string
-        pid     int
-        wantErr bool  // Note: IsAlive() returns bool, not error
+        name string
+        pid  int
+        want bool
     }{
-        {"valid pid", os.Getpid(), false},
-        {"invalid pid", -1, true},
+        {"own pid", os.Getpid(), true},
+        {"negative pid", -1, false},
     }
-    
+
     for _, tt := range tests {
         t.Run(tt.name, func(t *testing.T) {
-            lf := &Lockfile{PID: tt.pid}
-            got := lf.IsAlive()
-            if got != !tt.wantErr {  // IsAlive true => expected alive (wantErr false)
-                t.Errorf("IsAlive(%d) = %v, want %v", tt.pid, got, !tt.wantErr)
+            if got := processAlive(tt.pid); got != tt.want {
+                t.Errorf("processAlive(%d) = %v, want %v", tt.pid, got, tt.want)
             }
         })
     }
@@ -193,7 +203,7 @@ go test -race ./...
 ### Testing Goroutines
 ```go
 func TestConcurrentAccess(t *testing.T) {
-    srv := NewServer()
+    srv := New(config.ServerConfig{}, "", slog.Default())
     
     // Spawn multiple goroutines
     done := make(chan error, 10)
@@ -219,28 +229,33 @@ func TestConcurrentAccess(t *testing.T) {
 
 ### Use `t.TempDir()` for Temporary Files
 ```go
-func TestWriteLockfile(t *testing.T) {
+func TestStateFile_RoundTrip(t *testing.T) {
     tmp := t.TempDir()  // Cleaned up automatically
     path := filepath.Join(tmp, "server.lock")
-    
-    lf := &Lockfile{PID: 1234, Address: "127.0.0.1:8787"}
-    if err := WriteLockfile(path, lf); err != nil {
-        t.Fatalf("WriteLockfile failed: %v", err)
+
+    sf := &StateFile{PID: 1234, Address: "127.0.0.1:8787", Token: "abc123"}
+    if err := CreateStateFile(path, sf); err != nil {
+        t.Fatalf("CreateStateFile failed: %v", err)
     }
-    
+
+    // no-replace publication: a second creation must conflict (EEXIST)
+    if err := CreateStateFile(path, sf); err == nil {
+        t.Fatal("expected no-replace conflict, got nil")
+    }
+
     // Verify file was written
-    data, err := ioutil.ReadFile(path)
+    data, err := os.ReadFile(path)
     if err != nil {
         t.Fatalf("ReadFile failed: %v", err)
     }
-    
-    var read Lockfile
+
+    var read StateFile
     if err := json.Unmarshal(data, &read); err != nil {
         t.Fatalf("Unmarshal failed: %v", err)
     }
-    
-    if read.PID != lf.PID {
-        t.Errorf("PID mismatch: got %d, want %d", read.PID, lf.PID)
+
+    if read.PID != sf.PID || read.Token != sf.Token {
+        t.Errorf("got %+v, want %+v", read, *sf)
     }
 }
 ```
@@ -322,12 +337,12 @@ ok    client      0.005s
 Mark performance-critical paths with benchmarks.
 
 ```go
-func BenchmarkIsAlive(b *testing.B) {
-    lf := &Lockfile{PID: os.Getpid()}
-    
+func BenchmarkProcessAlive(b *testing.B) {
+    pid := os.Getpid()
+
     b.ResetTimer()
     for i := 0; i < b.N; i++ {
-        lf.IsAlive()
+        processAlive(pid)
     }
 }
 ```
@@ -342,24 +357,24 @@ Keep test code DRY with helper functions.
 
 ```go
 func mustCreateClient(t *testing.T, baseURL string) *Client {
-    c := NewClient(baseURL)
-    if c == nil {
-        t.Fatal("failed to create client")
+    c, err := NewClient(baseURL, nil)
+    if err != nil {
+        t.Fatalf("failed to create client: %v", err)
     }
     return c
 }
 
-func mustWriteLockfile(t *testing.T, path string, lf *Lockfile) {
-    if err := WriteLockfile(path, lf); err != nil {
-        t.Fatalf("WriteLockfile failed: %v", err)
+func mustCreateStateFile(t *testing.T, path string, sf *StateFile) {
+    if err := CreateStateFile(path, sf); err != nil {
+        t.Fatalf("CreateStateFile failed: %v", err)
     }
 }
 
 // Use in tests
 func TestSomething(t *testing.T) {
     c := mustCreateClient(t, "http://localhost:8787")
-    lf := &Lockfile{...}
-    mustWriteLockfile(t, "/tmp/test.lock", lf)
+    sf := &StateFile{PID: os.Getpid(), Token: "test-token"}
+    mustCreateStateFile(t, filepath.Join(t.TempDir(), "server.lock"), sf)
 }
 ```
 
