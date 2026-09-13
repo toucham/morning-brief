@@ -23,8 +23,9 @@ func newServerCmd() *cobra.Command {
 // shutdown (see docs/IMPLEMENTATION.md, "Server Entrypoint").
 func newServerRunCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "Run",
-		Short: "Run the morning brief server",
+		Use:     "start",
+		Aliases: []string{"run"},
+		Short:   "Run the morning brief server",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("server start: %w", errNotImplemented)
 		},
