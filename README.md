@@ -2,7 +2,7 @@
 
 A Go CLI that summarizes morning news and stock moves via an LLM briefing.
 
-> **Status: Phase 1 complete, Phases 2–7 planned.** Roadmap slice 1 (client/server scaffold) is implemented and tested: both binaries build, `morning brief` / `morning server stop` work against the stub `POST /brief` + operational `GET /healthz` / `POST /shutdown`, and the standalone auto-spawn/detect lifecycle with token-verified identity is in place. News, LLM, stocks, TUI, and settings (Phases 2–7) are not implemented yet — `docs/IMPLEMENTATION.md` documents the mechanics for every phase.
+> **Status: Phase 1 complete, Phases 2–7 planned.** Roadmap slice 1 (client/server scaffold) is in place with the base HTTP endpoints and CLI plumbing. News, LLM, stocks, TUI, and settings (Phases 2–7) are planned — see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for system architecture and [docs/PRODUCT.md](docs/PRODUCT.md) for feature specifications.
 
 ## Documents
 

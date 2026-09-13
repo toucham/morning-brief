@@ -4,26 +4,13 @@ This file contains development guidelines for implementing the morning-brief pro
 
 This is the LLM-agnostic `AGENTS.md` standard — the agent-facing counterpart to `README.md` (which is for humans). Detailed guidance lives in `.agents/` subdirectory.
 
-## Agent Discovery
-
-This file is the single source of truth for agent-facing guidelines and is auto-loaded by the agents below. **Do not duplicate its content** — keep the per-tool entry points as thin symlinks to this file so the rules are loaded on every session without manual prompting.
-
-| Agent | Entry point (symlink → `AGENTS.md`) |
-|-------|--------------------------------------|
-| OpenCode, Codex, Gemini, most AGENTS.md-aware tools | `AGENTS.md` (this file, read directly) |
-| Claude Code | `CLAUDE.md` |
-| Cursor | `.cursorrules` |
-| GitHub Copilot (agent mode) | `.github/copilot-instructions.md` |
-
-If you add a new agent tool that uses a different conventions file, add a symlink to this file and a row to the table above. The detailed style, architecture, design, and testing guides live in [`.agents/`](.agents/) and are referenced throughout this file.
-
 ## Quick Reference
 
 | Document | Purpose |
 |----------|---------|
 | **[docs/PRODUCT.md](docs/PRODUCT.md)** | **Canonical product specification** — features, behavior, API, roadmap. Wins over all other docs for product behavior |
 | **[docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md)** | System implementation guide (Phases 1–7): directory layout, config structs, spawn/detect/stop lifecycle, CLI resolution flow, news/LLM/stocks/briefing/TUI/settings mechanics, verification plan. Wins over other docs for implementation mechanics |
-| **[.agents/ARCHITECTURE.md](.agents/ARCHITECTURE.md)** | Project structure, when to create packages/structs/interfaces, domain logic placement, package boundaries |
+| **[doc/ARCHITECTURE.md](.doc/ARCHITECTURE.md)** | Project structure, when to create packages/structs/interfaces, domain logic placement, package boundaries |
 | **[.agents/CODE_STYLE.md](.agents/CODE_STYLE.md)** | Naming conventions, documentation, comments, code organization, nil checks |
 | **[.agents/DESIGN_PATTERNS.md](.agents/DESIGN_PATTERNS.md)** | Dependency injection, error handling, interfaces, composition, concurrency, testing patterns |
 | **[.agents/TESTING.md](.agents/TESTING.md)** | Test organization, table-driven tests, mocks, error testing, concurrency, coverage |
@@ -35,8 +22,7 @@ If you add a new agent tool that uses a different conventions file, add a symlin
 ### Before Writing Code
 1. Read **[docs/PRODUCT.md](docs/PRODUCT.md)** to understand the product behavior you are implementing (it wins for behavior)
 2. Read **[docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md)** to understand the scope and mechanics of the phase you are implementing (Phases 1–7)
-3. Read **[.agents/ARCHITECTURE.md](.agents/ARCHITECTURE.md)** to understand package structure and where your code belongs
-4. Check **[.agents/DESIGN_PATTERNS.md](.agents/DESIGN_PATTERNS.md)** for the appropriate patterns
+3. Check **[.agents/DESIGN_PATTERNS.md](.agents/DESIGN_PATTERNS.md)** for the appropriate patterns
 
 ### While Writing Code
 1. Apply naming conventions from **[.agents/CODE_STYLE.md](.agents/CODE_STYLE.md)**
@@ -49,10 +35,9 @@ If you add a new agent tool that uses a different conventions file, add a symlin
 ### After Writing Code
 Use this **Code Review Checklist** before submitting:
 
-- [ ] Package organization matches the Phase 1 layout `cmd/{cli,server}` + `internal/{api,client,config,server,state}` (later phases add `render`, `news`, `stocks`, `briefing`, `llm` — see docs/PRODUCT.md and .agents/ARCHITECTURE.md)
+- [ ] Package organization matches the Phase 1 layout `cmd/{cli,server}` + `internal/{api,client,config,server}` (later phases add `render`, `news`, `stocks`, `briefing`, `llm` — see docs/PRODUCT.md and doc/ARCHITECTURE.md)
 - [ ] All exports have doc comments (see [.agents/CODE_STYLE.md](.agents/CODE_STYLE.md))
 - [ ] Errors are wrapped with context using `fmt.Errorf("%w", ...)`
-- [ ] Error strings are lowercase with no trailing punctuation (e.g. `errors.New("state file is nil")`)
 - [ ] No boolean error flags (`hasError`/`isError`); return an `error` value instead
 - [ ] Initialisms are consistently cased (`apiURL`, `userID`, `ServeHTTP` — never `apiUrl`, `userId`)
 - [ ] Empty slices use the nil form `var s []T`; preallocate known capacities (`make([]T, 0, cap)`)
@@ -73,7 +58,7 @@ Use this **Code Review Checklist** before submitting:
 
 ### Architecture
 - **Thin cmd/, thick internal/**: Entrypoints only in `cmd/`; all logic in `internal/` (Cobra command definitions in `cmd/cli` are the sanctioned exception)
-- **One responsibility per package**: `client`, `server`, `config`, `api`, `state`
+- **One responsibility per package**: `client`, `server`, `config`, `api`
 - **Platforms**: macOS and Linux only; do not add or imply Windows support
 - **Concrete-first, consumer-defined interfaces**: start with concrete types; add a small interface in the consuming package only when a second implementation or a test double genuinely needs one
 
@@ -203,9 +188,9 @@ func TestMyType_DoSomething(t *testing.T) {
 
 ## When in Doubt
 
-1. **Project structure**: See [.agents/ARCHITECTURE.md](.agents/ARCHITECTURE.md)
+1. **Project structure**: See [doc/ARCHITECTURE.md](doc/ARCHITECTURE.md)
 2. **Naming**: See [.agents/CODE_STYLE.md](.agents/CODE_STYLE.md)
-3. **How to organize code**: See [.agents/ARCHITECTURE.md](.agents/ARCHITECTURE.md) + [.agents/DESIGN_PATTERNS.md](.agents/DESIGN_PATTERNS.md)
+3. **How to organize code**: See [doc/ARCHITECTURE.md](doc/ARCHITECTURE.md) + [.agents/DESIGN_PATTERNS.md](.agents/DESIGN_PATTERNS.md)
 4. **Error handling**: See [.agents/DESIGN_PATTERNS.md](.agents/DESIGN_PATTERNS.md)
 5. **Testing**: See [.agents/TESTING.md](.agents/TESTING.md)
 6. **General best practices**: See [.agents/DESIGN_PATTERNS.md](.agents/DESIGN_PATTERNS.md)

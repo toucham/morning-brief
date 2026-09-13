@@ -82,10 +82,8 @@ func LoadConfig() (Config, string)  // error as string, not type error
 // Use Signal(0) to check if the process is alive without actually signaling it.
 err := proc.Signal(syscall.Signal(0))
 
-// Never signal a PID read from a state file: PID reuse could target an
-// unrelated process. Stop the managed server via authenticated POST /shutdown
-// to the verified identity instead.
-if err := c.Shutdown(ctx, sf.Token); err != nil {
+// Drain in-flight requests cleanly before exiting on cancellation.
+if err := srv.Shutdown(shutdownCtx); err != nil {
     return err
 }
 
@@ -93,8 +91,8 @@ if err := c.Shutdown(ctx, sf.Token); err != nil {
 // Check if process is alive
 err := proc.Signal(syscall.Signal(0))
 
-// Call the shutdown endpoint
-if err := c.Shutdown(ctx, sf.Token); err != nil {
+// Shutdown the server
+if err := srv.Shutdown(shutdownCtx); err != nil {
     return err
 }
 

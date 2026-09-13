@@ -272,7 +272,7 @@ func (cs *ChildService) Init() {
 
 ## Graceful Shutdown (Idiomatic Go 1.21+)
 
-This pattern is what makes `cmd/server` stoppable: OS signals (SIGINT/SIGTERM) stop a manually-run server, and the *same* context-cancellation path is taken when an authenticated `POST /shutdown` (what `morning server stop` sends, after identity verification) triggers the internal shutdown. Use `signal.NotifyContext` to cancel operations cleanly. In Phase 1 this state machine lives in `internal/server.Serve` (see `../docs/IMPLEMENTATION.md`), with `cmd/server` keeping only the flag/listener/signal wiring.
+This pattern is what makes `cmd/server` stoppable: OS signals (SIGINT/SIGTERM) trigger graceful context cancellation, stopping the server cleanly without dropping in-flight requests. Use `signal.NotifyContext` to handle cancellation. In Phase 1 this state machine lives in `internal/server.Serve`, with `cmd/server` keeping only the flag/listener/signal wiring.
 
 ```go
 // cmd/server/main.go (simplified; the Phase 1 flow in ../docs/IMPLEMENTATION.md also
@@ -335,7 +335,7 @@ func main() {
 - `http.Server.Shutdown(ctx)` gracefully stops accepting new connections and waits for active handlers to finish.
 - The timeout prevents the server from hanging forever — if shutdown takes >5s, it hard-stops anyway.
 - **Listener errors are selected on alongside the signal**: a bind/serve failure must exit non-zero, not be printed while main blocks forever on `<-ctx.Done()`.
-- `morning server stop` triggers this path via an authenticated `POST /shutdown` to the verified instance — it never sends SIGTERM to a PID read from the state file. A manual `kill` still works through the signal context.
+- Standard process managers (systemd, Docker) trigger this path via SIGTERM/SIGINT.
 
 ---
 
